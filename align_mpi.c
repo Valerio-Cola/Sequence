@@ -387,9 +387,15 @@ int main(int argc, char *argv[]) {
 
 	// Ognuno si prende tot pattern da cercare
 	int my_patterns = pat_number/size;
+	int resto = pat_number % size;
 
 	// Si tiene traccia del primo e dell'ultimo pattern
 	int my_first_pattern = rank * my_patterns;
+	
+	if(rank == size - 1){
+		my_patterns += resto;
+	}
+
 	int my_last_pattern = my_first_pattern + my_patterns -1;
 
 	MPI_Barrier( MPI_COMM_WORLD );
@@ -421,7 +427,7 @@ int main(int argc, char *argv[]) {
 		MPI_Send(seq_matches, seq_length, MPI_INT, 0, 0, MPI_COMM_WORLD);
 	}
 	
-	MPI_Barrier( MPI_COMM_WORLD );
+	//MPI_Barrier( MPI_COMM_WORLD );
 
 	// Il rank 0 si occuperà di sommare i seq_matches di tutti i rank
 	// Sicuramente si può ottimizzare questa parte
@@ -450,9 +456,23 @@ int main(int argc, char *argv[]) {
 		
 		free(local_seq_matches);
 	}
-
+	MPI_Barrier( MPI_COMM_WORLD );
+	
 	// Ognuno invia i pattern trovati al rank 0
-	MPI_Gather(pat_found + my_first_pattern, my_patterns, MPI_UNSIGNED_LONG, pat_found, my_patterns, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+	//MPI_Gather(pat_found + my_first_pattern, my_patterns, MPI_UNSIGNED_LONG, pat_found, my_patterns, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+	
+	int send_counts[size]; // {133, 133, 134}; // Numero di elementi da inviare per ciascun rank 
+	send_counts[rank] = my_patterns;
+
+	int displs[size]; //= {0, 133, 266};
+	displs[rank] = my_first_pattern;
+	
+	MPI_Allgather(&my_patterns, 1, MPI_INT, send_counts, 1, MPI_INT, MPI_COMM_WORLD);
+	MPI_Allgather(&my_first_pattern, 1, MPI_INT, displs, 1, MPI_INT, MPI_COMM_WORLD);
+
+	MPI_Barrier( MPI_COMM_WORLD );
+
+	MPI_Gatherv(pat_found + my_first_pattern, my_patterns, MPI_UNSIGNED_LONG, pat_found, send_counts, displs, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
 	
 	// Ognuno invia al rank 0 il numero di pattern trovati sommandoli con la reduce
 	int total_pat_matches = 0;
