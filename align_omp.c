@@ -368,10 +368,10 @@ int main(int argc, char *argv[]) {
 	unsigned long start;
 	int pat;
 	//int flag = 0;
-	#pragma omp parallel num_threads(4)
+	#pragma omp parallel num_threads(8) shared(pat_found, seq_matches)
 	{
-		#pragma omp parallel for private(start, pat) \
-		reduction(+:pat_matches) shared(pat_found, seq_matches) 
+		#pragma omp for private(start, pat) \
+		reduction(+:pat_matches) schedule(dynamic,1)
 		for( pat=0; pat < pat_number; pat++ ) {
 			/* 5.1. For each posible starting position */
 			for( start=0; start <= seq_length - pat_length[pat]; start++) {
