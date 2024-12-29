@@ -101,18 +101,21 @@ __global__ void sequencer(  int g_pat_number, unsigned long g_seq_length, char *
 			}
 			/* 5.1.2. Check if the loop ended with a match */
 			if ( lind == d_pat_length[pat] ) {
+				//printf("Pattern %d found at position %lu Tid: %d lind: %lu pat_lenght: %lu\n", pat, start, tid, lind, d_pat_length[pat]);
 				// qua ho tolto il & perché era un errore di indirizzamento
 				atomicAdd(g_pat_matches, 1);
 				// qua invece ho castato le variabili in unsigned long long non so perché prima non andasse bene
 				atomicExch((unsigned long long*)&g_pat_found[pat], (unsigned long long)start);
 				break;
 			}
-		}	
+		}
+
 		/* 5.2. Pattern found */
 		if ( g_pat_found[pat] != (unsigned long)NOT_FOUND ) {
 			/* 4.2.1. Increment the number of pattern matches on the sequence positions */
 			increment_matches( pat, g_pat_found, d_pat_length, g_seq_matches );
 		}
+
 		__syncthreads();
 	}
 }
@@ -472,10 +475,13 @@ int main(int argc, char *argv[]) {
 	int init_value = 0;
 	cudaMemcpy(g_pat_matches, &init_value, sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(g_pat_found, pat_found, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
-	
+
+
 	// Ponendo di avere 256 thread per blocco potremmo fare ceil(pat_number/256.0)
 	// cosi da calcolare il numero di blocchi necessari per dividere le sequenze da cercare tra i thread
 	// Potremmo quindi fare che ogni thread cerca una sola sequenza?
+
+	CUDA_CHECK_FUNCTION(cudaMemcpy(d_pat_length, pat_length, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice));
 
 	/*
 	Facciamo con 1024 thread per blocco, questo perché il massimo numero di thread per SM nell'architettura Turing è 1024 (max 32 warp per SM, ogni warp è da 32 threads)
@@ -484,7 +490,7 @@ int main(int argc, char *argv[]) {
 	*/
 
 	// Indicativa per i test
-	sequencer<<<ceil(pat_number/256.0), 256>>>(pat_number, seq_length, sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
+	sequencer<<<ceil(pat_number/1024.0), 1024>>>(pat_number, seq_length, sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
 
 	cudaDeviceSynchronize();
 
@@ -493,14 +499,19 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(&pat_matches, g_pat_matches, sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
 
-
 	cudaFree(g_seq_matches);
 	cudaFree(g_pat_matches);
 	cudaFree(g_pat_found);
 	cudaFree(d_pattern);
 	cudaFree(d_pat_length);
 
-	cudaDeviceSynchronize();
+
+	// Debug: Print seq_matches array 
+	printf("Sequence matches: ");
+	for (lind = 0; lind < seq_length; lind++) {
+		printf("%d ", seq_matches[lind]);
+	}
+	printf("\n");
 	
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;

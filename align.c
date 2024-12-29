@@ -350,6 +350,9 @@ int main(int argc, char *argv[]) {
  *
  */
 
+	
+	// Print pattern lengths
+
 	/* 4. Initialize ancillary structures */
 
 	
@@ -412,6 +415,13 @@ int main(int argc, char *argv[]) {
 			increment_matches( pat, pat_found, pat_length, seq_matches );
 		}
 	}
+
+	/* Debug: Print seq_matches array */
+	printf("Sequence matches: ");
+	for (lind = 0; lind < seq_length; lind++) {
+		printf("%d ", seq_matches[lind]);
+	}
+	printf("\n");
 
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;
