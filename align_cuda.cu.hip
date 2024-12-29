@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Exact genetic sequence alignment
  * (Using brute force)
@@ -18,11 +19,11 @@
 #include<sys/time.h>
 
 /* Headers for the CUDA assignment versions */
-#include<cuda.h>
+#include<hip/hip_runtime.h>
 
 /* Example of macros for error checking in CUDA */
-#define CUDA_CHECK_FUNCTION( call )	{ cudaError_t check = call; if ( check != cudaSuccess ) fprintf(stderr, "CUDA Error in line: %d, %s\n", __LINE__, cudaGetErrorString(check) ); }
-#define CUDA_CHECK_KERNEL( )	{ cudaError_t check = cudaGetLastError(); if ( check != cudaSuccess ) fprintf(stderr, "CUDA Kernel Error in line: %d, %s\n", __LINE__, cudaGetErrorString(check) ); }
+#define CUDA_CHECK_FUNCTION( call )	{ hipError_t check = call; if ( check != hipSuccess ) fprintf(stderr, "CUDA Error in line: %d, %s\n", __LINE__, hipGetErrorString(check) ); }
+#define CUDA_CHECK_KERNEL( )	{ hipError_t check = hipGetLastError(); if ( check != hipSuccess ) fprintf(stderr, "CUDA Kernel Error in line: %d, %s\n", __LINE__, hipGetErrorString(check) ); }
 
 /* Arbitrary value to indicate that no matches are found */
 #define	NOT_FOUND	-1
@@ -259,7 +260,7 @@ int main(int argc, char *argv[]) {
 	printf("\n");
 #endif // DEBUG
 
-        CUDA_CHECK_FUNCTION( cudaSetDevice(0) );
+        CUDA_CHECK_FUNCTION( hipSetDevice(0) );
 
 	/* 2. Initialize data structures */
 	/* 2.1. Skip allocate and fill sequence */
@@ -346,8 +347,8 @@ int main(int argc, char *argv[]) {
 	/* Allocate and move the patterns to the GPU */
 	unsigned long *d_pat_length;
 	char **d_pattern;
-	CUDA_CHECK_FUNCTION( cudaMalloc( &d_pat_length, sizeof(unsigned long) * pat_number ) );
-	CUDA_CHECK_FUNCTION( cudaMalloc( &d_pattern, sizeof(char *) * pat_number ) );
+	CUDA_CHECK_FUNCTION( hipMalloc( &d_pat_length, sizeof(unsigned long) * pat_number ) );
+	CUDA_CHECK_FUNCTION( hipMalloc( &d_pattern, sizeof(char *) * pat_number ) );
 
 	char **d_pattern_in_host = (char **)malloc( sizeof(char*) * pat_number );
 	if ( d_pattern_in_host == NULL ) {
@@ -355,10 +356,10 @@ int main(int argc, char *argv[]) {
 		exit( EXIT_FAILURE );
 	}
 	for( ind=0; ind<pat_number; ind++ ) {
-		CUDA_CHECK_FUNCTION( cudaMalloc( &(d_pattern_in_host[ind]), sizeof(char *) * pat_length[ind] ) );
-        	CUDA_CHECK_FUNCTION( cudaMemcpy( d_pattern_in_host[ind], pattern[ind], pat_length[ind] * sizeof(char), cudaMemcpyHostToDevice ) );
+		CUDA_CHECK_FUNCTION( hipMalloc( &(d_pattern_in_host[ind]), sizeof(char *) * pat_length[ind] ) );
+        	CUDA_CHECK_FUNCTION( hipMemcpy( d_pattern_in_host[ind], pattern[ind], pat_length[ind] * sizeof(char), hipMemcpyHostToDevice ) );
 	}
-	CUDA_CHECK_FUNCTION( cudaMemcpy( d_pattern, d_pattern_in_host, pat_number * sizeof(char *), cudaMemcpyHostToDevice ) );
+	CUDA_CHECK_FUNCTION( hipMemcpy( d_pattern, d_pattern_in_host, pat_number * sizeof(char *), hipMemcpyHostToDevice ) );
 
 	/* Avoid the usage of arguments to take strategic decisions
 	 * In a real case the user only has the patterns and sequence data to analize
@@ -387,7 +388,7 @@ int main(int argc, char *argv[]) {
 	}
 	
 	/* 3. Start global timer */
-        CUDA_CHECK_FUNCTION( cudaDeviceSynchronize() );
+        CUDA_CHECK_FUNCTION( hipDeviceSynchronize() );
 	double ttotal = cp_Wtime();
 
 /*
@@ -453,9 +454,9 @@ int main(int argc, char *argv[]) {
 	inoltre con la clausola __constant__ vai ad usare già la shared memory (secondo le slide del prof)
 	*/
 
-	cudaMemcpyToSymbol(g_seq_length, &seq_length, sizeof(unsigned long));
-	cudaMemcpyToSymbol(g_sequence, sequence, seq_length * sizeof(char));
-	cudaMemcpyToSymbol(g_pat_number, &pat_number, sizeof(int));
+	hipMemcpyToSymbol(HIP_SYMBOL(g_seq_length), &seq_length, sizeof(unsigned long));
+	hipMemcpyToSymbol(HIP_SYMBOL(g_sequence), sequence, seq_length * sizeof(char));
+	hipMemcpyToSymbol(HIP_SYMBOL(g_pat_number), &pat_number, sizeof(int));
 
 
 	// Necessariamente nella globale della GPU nel caso ci siano più blocchi che devono modificare
@@ -464,14 +465,14 @@ int main(int argc, char *argv[]) {
 	unsigned long *g_pat_found;
 
 
-	cudaMalloc(&g_seq_matches, seq_length * sizeof(int));
-	cudaMalloc(&g_pat_matches, sizeof(int));
-	cudaMalloc(&g_pat_found, pat_number * sizeof(unsigned long));
+	hipMalloc(&g_seq_matches, seq_length * sizeof(int));
+	hipMalloc(&g_pat_matches, sizeof(int));
+	hipMalloc(&g_pat_found, pat_number * sizeof(unsigned long));
 
-	cudaMemcpy(g_seq_matches, seq_matches, seq_length * sizeof(int), cudaMemcpyHostToDevice);
+	hipMemcpy(g_seq_matches, seq_matches, seq_length * sizeof(int), hipMemcpyHostToDevice);
 	int init_value = 0;
-	cudaMemcpy(g_pat_matches, &init_value, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(g_pat_found, pat_found, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
+	hipMemcpy(g_pat_matches, &init_value, sizeof(int), hipMemcpyHostToDevice);
+	hipMemcpy(g_pat_found, pat_found, pat_number * sizeof(unsigned long), hipMemcpyHostToDevice);
 	
 	// Ponendo di avere 256 thread per blocco potremmo fare ceil(pat_number/256.0)
 	// cosi da calcolare il numero di blocchi necessari per dividere le sequenze da cercare tra i thread
@@ -486,21 +487,21 @@ int main(int argc, char *argv[]) {
 	// Indicativa per i test
 	sequencer<<<ceil(pat_number/256.0), 256>>>(pat_number, seq_length, sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
 
-	cudaDeviceSynchronize();
+	hipDeviceSynchronize();
 
 	// Riporto le variabili, che il kernel ha modificato, utilizzate dal checksum nell'host
-	cudaMemcpy(seq_matches, g_seq_matches, seq_length * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(&pat_matches, g_pat_matches, sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
+	hipMemcpy(seq_matches, g_seq_matches, seq_length * sizeof(int), hipMemcpyDeviceToHost);
+	hipMemcpy(&pat_matches, g_pat_matches, sizeof(int), hipMemcpyDeviceToHost);
+	hipMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), hipMemcpyDeviceToHost);
 
 
-	cudaFree(g_seq_matches);
-	cudaFree(g_pat_matches);
-	cudaFree(g_pat_found);
-	cudaFree(d_pattern);
-	cudaFree(d_pat_length);
+	hipFree(g_seq_matches);
+	hipFree(g_pat_matches);
+	hipFree(g_pat_found);
+	hipFree(d_pattern);
+	hipFree(d_pat_length);
 
-	cudaDeviceSynchronize();
+	hipDeviceSynchronize();
 	
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;
@@ -542,7 +543,7 @@ int main(int argc, char *argv[]) {
  */
 
 	/* 8. Stop global timer */
-        CUDA_CHECK_FUNCTION( cudaDeviceSynchronize() );
+        CUDA_CHECK_FUNCTION( hipDeviceSynchronize() );
 	ttotal = cp_Wtime() - ttotal;
 
 	/* 9. Output for leaderboard */
