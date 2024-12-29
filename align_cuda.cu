@@ -7,7 +7,7 @@
  * Computacion Paralela, Grado en Informatica (Universidad de Valladolid)
  * 2023/2024
  *
- * v1.3
+ * v1.3 
  *
  * (c) 2024, Arturo Gonzalez-Escribano
  */
@@ -54,6 +54,44 @@ double cp_Wtime(){
  */
 /* ADD KERNELS AND OTHER FUNCTIONS HERE */
 
+__global__ void sequencer(){
+	unsigned long start;
+	int pat;
+	unsigned long lind;
+
+	/* Se vogliamo fare che ogni thread ha una sola sequenza da cercare
+		Questo primo for è inutile
+		il nostro thread int i = blockIdx.x * blockDim.x + threadIdx.x; (il prof ha fatto una cosa simile nella moltiplicazione tra vettori)
+		verifichiamo che intanto sia uno di quelli che deve lavorare indipendentemente dal blocco:  i < g_pat_number
+		e poi utilizziamo il suo indice come variabile pat  quindi pat = i nella dichiarazione.
+		Io ho intanto pensato a questa implementazione se vuoi fare in unaltro modo non cancellare questi commenti.
+	
+	*/
+	for( pat=0; pat < g_pat_number; pat++ ) {
+
+		/* 5.1. For each posible starting position */
+		for( start=0; start <= g_seq_length - g_pat_length[pat]; start++) {
+
+			/* 5.1.1. For each pattern element */
+			for( lind=0; lind<d_pat_length[pat]; lind++) {
+				/* Stop this test when different nucleotids are found */
+				if ( g_sequence[start + lind] != d_pattern[pat][lind] ) break;
+			}
+			/* 5.1.2. Check if the loop ended with a match */
+			if ( lind == d_pat_length[pat] ) {
+				atomicAdd(&pat_matches, 1);
+				atomicExch(&g_pat_found[pat], start);
+				break;
+			}
+		}
+
+		/* 5.2. Pattern found */
+		if ( g_pat_found[pat] != (unsigned long)NOT_FOUND ) {
+			/* 4.2.1. Increment the number of pattern matches on the sequence positions */
+			increment_matches( pat, g_pat_found, d_pat_length, g_seq_matches );
+		}
+	}
+}
 
 /*
  * Function: Increment the number of pattern matches on the sequence positions
@@ -63,9 +101,11 @@ void increment_matches( int pat, unsigned long *pat_found, unsigned long *pat_le
 	unsigned long ind;	
 	for( ind=0; ind<pat_length[pat]; ind++) {
 		if ( seq_matches[ pat_found[pat] + ind ] == NOT_FOUND )
-			seq_matches[ pat_found[pat] + ind ] = 0;
+			atomicExch(&seq_matches[ pat_found[pat] + ind ], 0);
+			//seq_matches[ pat_found[pat] + ind ] = 0;
 		else
-			seq_matches[ pat_found[pat] + ind ] ++;
+			atomicAdd(&seq_matches[ pat_found[pat] + ind ], 1);
+			//seq_matches[ pat_found[pat] + ind ] ++;
 	}
 }
 /*
@@ -391,34 +431,53 @@ int main(int argc, char *argv[]) {
 		seq_matches[lind] = NOT_FOUND;
 	}
 
-	/* 5. Search for each pattern */
-	unsigned long start;
-	int pat;
-	for( pat=0; pat < pat_number; pat++ ) {
+	// Variabili che non verranno modificate le sposto nella constant memory
+	// NOTA: d_pattern e d_pat_lenght gia allocati in GPU
+	__constant__ unsigned long g_seq_length;
+	__constant__ char g_sequence[seq_length];
+	__constant__ int g_pat_number;
+	
+	cudaMemcpyToSymbol(g_seq_length, &seq_length, sizeof(unsigned long));
+	cudaMemcpyToSymbol(g_sequence, sequence, seq_length * sizeof(char));
+	cudaMemcpyToSymbol(g_pat_number, &pat_number, sizeof(int));
 
-		/* 5.1. For each posible starting position */
-		for( start=0; start <= seq_length - pat_length[pat]; start++) {
 
-			/* 5.1.1. For each pattern element */
-			for( lind=0; lind<pat_length[pat]; lind++) {
-				/* Stop this test when different nucleotids are found */
-				if ( sequence[start + lind] != pattern[pat][lind] ) break;
-			}
-			/* 5.1.2. Check if the loop ended with a match */
-			if ( lind == pat_length[pat] ) {
-				pat_matches++;
-				pat_found[pat] = start;
-				break;
-			}
-		}
+	// Necessariamente nella globale della GPU nel caso ci siano più blocchi che devono modificare
+	int *g_seq_matches;
+	int *g_pat_matches;
+	unsigned long *g_pat_found;
 
-		/* 5.2. Pattern found */
-		if ( pat_found[pat] != (unsigned long)NOT_FOUND ) {
-			/* 4.2.1. Increment the number of pattern matches on the sequence positions */
-			increment_matches( pat, pat_found, pat_length, seq_matches );
-		}
-	}
 
+	cudaMalloc(&g_seq_matches, seq_length * sizeof(int));
+	cudaMalloc(&g_pat_matches, sizeof(int));
+	cudaMalloc(&g_pat_found, pat_number * sizeof(unsigned long));
+
+	cudaMemcpy(g_seq_matches, seq_matches, seq_length * sizeof(int), cudaMemcpyHostToDevice);
+	int init_value = 0;
+	cudaMemcpy(g_pat_matches, &init_value, sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(g_pat_found, pat_found, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
+	
+	// Ponendo di avere 256 thread per blocco potremmo fare ceil(pat_number/256.0)
+	// cosi da calcolare il numero di blocchi necessari per dividere le sequenze da cercare tra i thread
+	// Potremmo quindi fare che ogni thread cerca una sola sequenza?
+
+	// Indicativa per i test
+	sequencer<<<1,10>>>();
+
+	// Riporto le variabili, che il kernel ha modificato, utilizzate dal checksum nell'host
+	cudaMemcpy(seq_matches, g_seq_matches, seq_length * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&pat_matches, g_pat_matches, sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
+
+
+	cudaFree(g_seq_matches);
+	cudaFree(g_pat_matches);
+	cudaFree(g_pat_found);
+	cudaFree(d_pattern);
+	cudaFree(d_pat_length);
+
+	cudaDeviceSynchronize();
+	
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;
 	unsigned long checksum_found = 0;
@@ -448,6 +507,7 @@ int main(int argc, char *argv[]) {
 #endif // DEBUG
 
 	/* Free local resources */	
+
 	free( sequence );
 	free( seq_matches );
 

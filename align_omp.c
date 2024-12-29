@@ -367,7 +367,6 @@ int main(int argc, char *argv[]) {
 	/* 5. Search for each pattern */
 	unsigned long start;
 	int pat;
-	//int flag = 0;
 	#pragma omp parallel num_threads(8) shared(pat_found, seq_matches)
 	{
 		#pragma omp for private(start, pat) \
@@ -379,7 +378,6 @@ int main(int argc, char *argv[]) {
 				for( lind=0; lind<pat_length[pat]; lind++) {
 					/* Stop this test when different nucleotids are found */
 					if ( sequence[start + lind] != pattern[pat][lind] ) break;
-					
 				}
 				
 				/* 5.1.2. Check if the loop ended with a match */
@@ -389,9 +387,11 @@ int main(int argc, char *argv[]) {
 					break;
 				}
 			}
-	
+
 			/* 5.2. Pattern found */
 			if ( pat_found[pat] != (unsigned long)NOT_FOUND ) {
+				/* 4.2.1. Increment the number of pattern matches on the sequence positions */
+				#pragma omp
 				/* 4.2.1. Increment the number of pattern matches on the sequence positions */
 				#pragma omp critical
 				increment_matches( pat, pat_found, pat_length, seq_matches );
