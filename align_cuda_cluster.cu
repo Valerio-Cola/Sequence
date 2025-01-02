@@ -70,54 +70,55 @@ __device__ void increment_matches( int pat, unsigned long *pat_found, unsigned l
 	}
 }
 
-__global__ void sequencer(  int g_pat_number, unsigned long g_seq_length, char *g_sequence, unsigned long *d_pat_length, 
-							char **d_pattern, int *g_seq_matches, int *g_pat_matches, unsigned long *g_pat_found  ) {
-	unsigned long start;
-	int pat;
-	unsigned long lind;
+__global__ void sequencer(unsigned long *g_seq_length, int *g_pat_number, char *g_sequence, unsigned long *d_pat_length, char **d_pattern, int *g_seq_matches, int *g_pat_matches, unsigned long *g_pat_found) { 
+    unsigned long start;
+    int pat;
+    unsigned long lind;
+    /* Se vogliamo fare che ogni thread ha una sola sequenza da cercare
+            Questo primo for è inutile
+            il nostro thread int i = blockIdx.x * blockDim.x + threadIdx.x; (il prof ha fatto una cosa simile nella moltiplicazione tra vettori)
+            verifichiamo che intanto sia uno di quelli che deve lavorare indipendentemente dal blocco:  i < g_pat_number
+            e poi utilizziamo il suo indice come variabile pat  quindi pat = i nella dichiarazione.
+            Io ho intanto pensato a questa implementazione se vuoi fare in unaltro modo non cancellare questi commenti.
 
-	/* Se vogliamo fare che ogni thread ha una sola sequenza da cercare
-		Questo primo for è inutile
-		il nostro thread int i = blockIdx.x * blockDim.x + threadIdx.x; (il prof ha fatto una cosa simile nella moltiplicazione tra vettori)
-		verifichiamo che intanto sia uno di quelli che deve lavorare indipendentemente dal blocco:  i < g_pat_number
-		e poi utilizziamo il suo indice come variabile pat  quindi pat = i nella dichiarazione.
-		Io ho intanto pensato a questa implementazione se vuoi fare in unaltro modo non cancellare questi commenti.
+            noi possiamo trovare il (o i) pattern da cercare basandoci sull'indice del thread
+            se facciamo che ogni thread cerca solo un pattern dobbiamo organizzare i thread nel blocco in un certo modo
+    */
 
-		noi possiamo trovare il (o i) pattern da cercare basandoci sull'indice del thread
-		se facciamo che ogni thread cerca solo un pattern dobbiamo organizzare i thread nel blocco in un certo modo
-	*/
-
-	int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (tid < g_pat_number) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    //printf("Total patterns to find: %d\n", *g_pat_number);
+    if (tid < *g_pat_number) {
+        //printf("Thread %d is working\n", tid);
         // esegui il lavoro solo se l'ID del thread è valido
-		pat = tid;
-		/* 5.1. For each posible starting position */
-		for( start=0; start <= g_seq_length - d_pat_length[pat]; start++) {	
-			/* 5.1.1. For each pattern element */
-			for( lind=0; lind<d_pat_length[pat]; lind++) {
-				/* Stop this test when different nucleotids are found */
-				if ( g_sequence[start + lind] != d_pattern[pat][lind] ) break;
-			}
-			/* 5.1.2. Check if the loop ended with a match */
-			if ( lind == d_pat_length[pat] ) {
-				//printf("Pattern %d found at position %lu Tid: %d lind: %lu pat_lenght: %lu\n", pat, start, tid, lind, d_pat_length[pat]);
-				// qua ho tolto il & perché era un errore di indirizzamento
-				atomicAdd(g_pat_matches, 1);
-				// qua invece ho castato le variabili in unsigned long long non so perché prima non andasse bene
-				atomicExch((unsigned long long*)&g_pat_found[pat], (unsigned long long)start);
-				break;
-			}
-		}
+        pat = tid;
+        /* 5.1. For each posible starting position */
+        for( start=0; start <= *g_seq_length - d_pat_length[pat]; start++) {
+            /* 5.1.1. For each pattern element */
+            for( lind=0; lind<d_pat_length[pat]; lind++) {
 
-		/* 5.2. Pattern found */
-		if ( g_pat_found[pat] != (unsigned long)NOT_FOUND ) {
-			/* 4.2.1. Increment the number of pattern matches on the sequence positions */
-			increment_matches( pat, g_pat_found, d_pat_length, g_seq_matches );
-		}
+                /* Stop this test when different nucleotids are found */
+                if ( g_sequence[start + lind] != d_pattern[pat][lind] ) break;
+            }
+            /* 5.1.2. Check if the loop ended with a match */
+            if ( lind == d_pat_length[pat] ) {
+                //printf("Pattern %d found at position %lu Tid: %d lind: %lu pat_lenght: %lu\n", pat, start, tid, lind, d_pat_length[pat]);
+                // qua ho tolto il & perché era un errore di indirizzamento
+                atomicAdd(g_pat_matches, 1);
+                //printf("Thread %d: Total pattern matches: %d\n", tid, atomicAdd(g_pat_matches, 0));
+                // qua invece ho castato le variabili in unsigned long long non so perché prima non andasse bene
+                atomicExch((unsigned long long*)&g_pat_found[pat], (unsigned long long)start);
+                break;
+            }
+        }
 
+        /* 5.2. Pattern found */
+        if ( g_pat_found[pat] != (unsigned long)NOT_FOUND ) {
+            /* 4.2.1. Increment the number of pattern matches on the sequence positions */
+            increment_matches( pat, g_pat_found, d_pat_length, g_seq_matches );
+        }
 		__syncthreads();
 	}
+
 }
 
 /*
@@ -445,9 +446,9 @@ int main(int argc, char *argv[]) {
 
 	// Variabili che non verranno modificate le sposto nella constant memory
 	// NOTA: d_pattern e d_pat_lenght gia allocati in GPU
-	unsigned long g_seq_length;
-	int g_pat_number;
-	char g_sequence[seq_length];
+	unsigned long *g_seq_length;
+	int *g_pat_number;
+	char *g_sequence;
 
 	/* 
 	alla fine ho lasciato tutto in global memory per due motivi: perché la memoria globale è cached 
@@ -456,9 +457,9 @@ int main(int argc, char *argv[]) {
 	inoltre con la clausola __constant__ vai ad usare già la shared memory (secondo le slide del prof)
 	*/
 
-	cudaMemcpyToSymbol(g_seq_length, &seq_length, sizeof(unsigned long));
-	cudaMemcpyToSymbol(g_sequence, sequence, seq_length * sizeof(char));
-	cudaMemcpyToSymbol(g_pat_number, &pat_number, sizeof(int));
+	//cudaMemcpyToSymbol(g_seq_length, &seq_length, sizeof(unsigned long));
+	//cudaMemcpyToSymbol(g_sequence, sequence, seq_length * sizeof(char));
+	//cudaMemcpyToSymbol(g_pat_number, &pat_number, sizeof(int));
 
 
 	// Necessariamente nella globale della GPU nel caso ci siano più blocchi che devono modificare
@@ -470,7 +471,13 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&g_seq_matches, seq_length * sizeof(int));
 	cudaMalloc(&g_pat_matches, sizeof(int));
 	cudaMalloc(&g_pat_found, pat_number * sizeof(unsigned long));
+	cudaMalloc(&g_seq_length, sizeof(unsigned long));
+	cudaMalloc(&g_pat_number, sizeof(int));
+	cudaMalloc(&g_sequence, seq_length * sizeof(char));
 
+	cudaMemcpy(g_seq_length, &seq_length, sizeof(unsigned long), cudaMemcpyHostToDevice);
+	cudaMemcpy(g_pat_number, &pat_number, sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(g_sequence, sequence, seq_length * sizeof(char), cudaMemcpyHostToDevice);
 	cudaMemcpy(g_seq_matches, seq_matches, seq_length * sizeof(int), cudaMemcpyHostToDevice);
 	int init_value = 0;
 	cudaMemcpy(g_pat_matches, &init_value, sizeof(int), cudaMemcpyHostToDevice);
@@ -487,31 +494,26 @@ int main(int argc, char *argv[]) {
 	Facciamo con 1024 thread per blocco, questo perché il massimo numero di thread per SM nell'architettura Turing è 1024 (max 32 warp per SM, ogni warp è da 32 threads)
 	per calcolare il numero di blocchi lo facciamo con ceil(pat_number/1024.0), possiamo pure provare con altre grandezze di blocchi (max numero di blocchi per SM è 16)
 	noi stiamo facendo che ogni thread ha una sequenza da vedere, ma se ci sono meno di 1024 sequenze che succede?
+	Aggiunto: succede che si genera solo un blocco e lavorano solo tot thread, il resto rimane inutilizzato
 	*/
 
 	// Indicativa per i test
-	sequencer<<<ceil(pat_number/1024.0), 1024>>>(pat_number, seq_length, sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
+	sequencer<<<ceil(pat_number/1024.0), 1024>>>(g_seq_length, g_pat_number, g_sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
 
 	cudaDeviceSynchronize();
 
 	// Riporto le variabili, che il kernel ha modificato, utilizzate dal checksum nell'host
+	
 	cudaMemcpy(seq_matches, g_seq_matches, seq_length * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(&pat_matches, g_pat_matches, sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
+
 
 	cudaFree(g_seq_matches);
 	cudaFree(g_pat_matches);
 	cudaFree(g_pat_found);
 	cudaFree(d_pattern);
 	cudaFree(d_pat_length);
-
-
-	// Debug: Print seq_matches array 
-	printf("Sequence matches: ");
-	for (lind = 0; lind < seq_length; lind++) {
-		printf("%d ", seq_matches[lind]);
-	}
-	printf("\n");
 	
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;
