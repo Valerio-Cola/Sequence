@@ -59,7 +59,8 @@ double cp_Wtime(){
  * 	This function can be changed and/or optimized by the students
  */
 __device__ void increment_matches( int pat, unsigned long *pat_found, unsigned long *pat_length, int *seq_matches ) {
-	unsigned long ind;	
+	unsigned long ind;
+	__syncthreads();	
 	for( ind=0; ind<pat_length[pat]; ind++) {
 		if ( seq_matches[ pat_found[pat] + ind ] == NOT_FOUND )
 			atomicExch(&seq_matches[ pat_found[pat] + ind ], 0);
@@ -68,6 +69,7 @@ __device__ void increment_matches( int pat, unsigned long *pat_found, unsigned l
 			atomicAdd(&seq_matches[ pat_found[pat] + ind ], 1);
 			//seq_matches[ pat_found[pat] + ind ] ++;
 	}
+	__syncthreads();
 }
 
 __global__ void sequencer(unsigned long *g_seq_length, int *g_pat_number, char *g_sequence, unsigned long *d_pat_length, char **d_pattern, int *g_seq_matches, int *g_pat_matches, unsigned long *g_pat_found) { 

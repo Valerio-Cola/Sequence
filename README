@@ -45,9 +45,33 @@ Seme per generare sequenza: 609823
 
 Campioni + pattern = pattern totali che i processi si dividono devono essere divisibili per ora
 
-2) Simple tests for race conditions:
-------------------------------------
 1000 0.35 0.2 0.25 0 0 0 20000 10 0 500 0 M 4353435
+------------------------------------
+Per cluster
+
+ 
+
+job.sub
+universe = vanilla
+
+# Where should the output/error be saved
+log = cuda_job.log
+output = cuda_job.out
+error = cuda_job.err
+
+# Request GPU resources
+request_gpus = 1
+
+# Specify any environment setup if needed
+getenv = True
+
+queue
+
+nvcc -O3 -Xcompiler -Wall align.cu rng.c -lm -o align
+
+condor_submit job.sub -append 'executable = align' -append 'arguments = 1000 0.35 0.2 0.25 0 0 0 200 10 0 500 0 M 4353435'
+-----------------------------------------
+2) Simple tests for race conditions:
 
 10000 0.35 0.2 0.25 0 0 0 10000 9000 9000 50 100 M 4353435
 
