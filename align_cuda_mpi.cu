@@ -16,6 +16,7 @@
 #include<string.h>
 #include<limits.h>
 #include<sys/time.h>
+#include<mpi.h>
 
 /* Headers for the CUDA assignment versions */
 #include<cuda.h>
@@ -62,14 +63,13 @@ __device__ void increment_matches( int pat, unsigned long *pat_found, unsigned l
 	unsigned long ind;
 	//__syncthreads();	
 	for( ind=0; ind<pat_length[pat]; ind++) {
-		
 			atomicAdd(&seq_matches[ pat_found[pat] + ind ], 1);
 			//seq_matches[ pat_found[pat] + ind ] ++;
 	}
 	//__syncthreads();
 }
 
-__global__ void sequencer(unsigned long *g_seq_length, int *g_pat_number, char *g_sequence, unsigned long *d_pat_length, char **d_pattern, int *g_seq_matches, int *g_pat_matches, unsigned long *g_pat_found) { 
+__global__ void sequencer(unsigned long *g_seq_length, int *g_pat_number, char *g_sequence, unsigned long *d_pat_length, char **d_pattern, int *g_seq_matches, int *g_pat_matches, unsigned long *g_pat_found, int *g_my_first_pattern) { 
     unsigned long start;
     int pat;
     unsigned long lind;
@@ -91,7 +91,7 @@ __global__ void sequencer(unsigned long *g_seq_length, int *g_pat_number, char *
         // esegui il lavoro solo se l'ID del thread è valido
         pat = tid;
         /* 5.1. For each posible starting position */
-        for( start=0; start <= *g_seq_length - d_pat_length[pat]; start++) {
+        for( start=*g_my_first_pattern; start <= *g_seq_length - d_pat_length[pat]; start++) {
             /* 5.1.1. For each pattern element */
             for( lind=0; lind<d_pat_length[pat]; lind++) {
 
@@ -357,9 +357,7 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr,"\n-- Error allocating the patterns structures replicated in the host for size: %d\n", pat_number );
 		exit( EXIT_FAILURE );
 	}
-	unsigned long long int bytes = 0;
 	for( ind=0; ind<pat_number; ind++ ) {
-		printf("Allocated Size: %llu bytes\n", bytes);
 		CUDA_CHECK_FUNCTION( cudaMalloc( &(d_pattern_in_host[ind]), sizeof(char *) * pat_length[ind] ) );
         	CUDA_CHECK_FUNCTION( cudaMemcpy( d_pattern_in_host[ind], pattern[ind], pat_length[ind] * sizeof(char), cudaMemcpyHostToDevice ) );
 	}
@@ -401,6 +399,30 @@ int main(int argc, char *argv[]) {
  * DO NOT USE OpenMP IN YOUR CODE
  *
  */
+
+    // Inizializzazione MPI
+    MPI_Init( &argc, &argv );
+
+	int rank;
+	MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+
+    int size;
+	MPI_Comm_size( MPI_COMM_WORLD, &size );
+
+	// Idealmente 1 rank per GPU
+    // Ognuno si prende tot pattern da cercare
+	int my_pat_number = pat_number/size;
+	int resto = pat_number % size;
+
+	// Si tiene traccia del primo e dell'ultimo pattern
+	int my_first_pattern = rank * my_pat_number;
+	
+	if(rank == size - 1){
+		my_pat_number += resto;
+	}
+
+	MPI_Barrier( MPI_COMM_WORLD );
+
 	/* 2.1. Allocate and fill sequence */
 	char *sequence = (char *)malloc( sizeof(char) * seq_length );
 	if ( sequence == NULL ) {
@@ -408,8 +430,14 @@ int main(int argc, char *argv[]) {
 		exit( EXIT_FAILURE );
 	}
 
-	random = rng_new( seed );
-	generate_rng_sequence( &random, prob_G, prob_C, prob_A, sequence, seq_length);
+    if (rank == 0) {
+	    random = rng_new( seed );
+	    generate_rng_sequence( &random, prob_G, prob_C, prob_A, sequence, seq_length);
+    }
+
+    MPI_Bcast(sequence, seq_length, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+	MPI_Barrier( MPI_COMM_WORLD );
 
 #ifdef DEBUG
 	/* DEBUG: Print sequence and patterns */
@@ -429,7 +457,6 @@ int main(int argc, char *argv[]) {
 	printf("-----------------\n\n");
 #endif // DEBUG
 
-
 	/* 2.3.2. Other results related to the main sequence */
 	int *seq_matches;
 	seq_matches = (int *)malloc( sizeof(int) * seq_length );
@@ -442,9 +469,35 @@ int main(int argc, char *argv[]) {
 	for( ind=0; ind<pat_number; ind++) {
 		pat_found[ind] = (unsigned long)NOT_FOUND;
 	}
+
 	for( lind=0; lind<seq_length; lind++) {
 		seq_matches[lind] = NOT_FOUND;
 	}
+    
+	unsigned long *my_pat_found;
+	my_pat_found = (unsigned long *)malloc( sizeof(unsigned long) * my_pat_number );
+	if ( my_pat_found == NULL ) {
+		fprintf(stderr,"\n-- Error allocating aux pattern structure for size: %d\n", my_pat_number );
+		exit( EXIT_FAILURE );
+	}
+
+	for( ind=0; ind<my_pat_number; ind++) {
+		my_pat_found[ind] = (unsigned long)NOT_FOUND;
+	}
+
+	MPI_Barrier( MPI_COMM_WORLD );
+
+    /*
+    Vorrei vedere se si può implementare MPI non soltanto per rendere possibile l'utilizzo di più GPU ma anche
+    per ovviare al problema della memoria non sufficiente per pattern molto grandi, vedo già che questo errore
+    non possiamo direttamente risolverlo così perché l'allocazione di tutti i pattern avviene in un area del codice non modificabile (righe 361,362)
+    */
+
+    // Comando usato per compilare nel cluster:
+    // nvcc -O3 -Xcompiler -Wall -arch=sm_75 align_mpi.cu rng.c -o align_mpi -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -I/usr/lib/x86_64-linux-gnu/openmpi/include -lm -lmpi
+
+	// nvcc -arch=sm_75 align_mpi.cu -o align_mpi -I/usr/lib/x86_64-linux-gnu/openmpi/include -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi
+
 
 	// Variabili che non verranno modificate le sposto nella constant memory
 	// NOTA: d_pattern e d_pat_lenght gia allocati in GPU
@@ -469,28 +522,34 @@ int main(int argc, char *argv[]) {
 	int *g_pat_matches;
 	unsigned long *g_pat_found;
 
+	int *g_my_first_pattern;
+
 
 	cudaMalloc(&g_seq_matches, seq_length * sizeof(int));
 	cudaMalloc(&g_pat_matches, sizeof(int));
-	cudaMalloc(&g_pat_found, pat_number * sizeof(unsigned long));
+	cudaMalloc(&g_pat_found, my_pat_number * sizeof(unsigned long));
 	cudaMalloc(&g_seq_length, sizeof(unsigned long));
 	cudaMalloc(&g_pat_number, sizeof(int));
 	cudaMalloc(&g_sequence, seq_length * sizeof(char));
+	
+	cudaMalloc(&g_my_first_pattern, sizeof(int));
 
 	cudaMemcpy(g_seq_length, &seq_length, sizeof(unsigned long), cudaMemcpyHostToDevice);
-	cudaMemcpy(g_pat_number, &pat_number, sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(g_pat_number, &my_pat_number, sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(g_sequence, sequence, seq_length * sizeof(char), cudaMemcpyHostToDevice);
 	cudaMemcpy(g_seq_matches, seq_matches, seq_length * sizeof(int), cudaMemcpyHostToDevice);
 	int init_value = 0;
 	cudaMemcpy(g_pat_matches, &init_value, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(g_pat_found, pat_found, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
+	cudaMemcpy(g_pat_found, my_pat_found, my_pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
+
+	cudaMemcpy(g_my_first_pattern, &my_first_pattern, sizeof(int), cudaMemcpyHostToDevice);
 
 
 	// Ponendo di avere 256 thread per blocco potremmo fare ceil(pat_number/256.0)
 	// cosi da calcolare il numero di blocchi necessari per dividere le sequenze da cercare tra i thread
 	// Potremmo quindi fare che ogni thread cerca una sola sequenza?
 
-	CUDA_CHECK_FUNCTION(cudaMemcpy(d_pat_length, pat_length, pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice));
+	cudaMemcpy(d_pat_length, &pat_length[my_first_pattern], my_pat_number * sizeof(unsigned long), cudaMemcpyHostToDevice);
 
 	/*
 	Facciamo con 1024 thread per blocco, questo perché il massimo numero di thread per SM nell'architettura Turing è 1024 (max 32 warp per SM, ogni warp è da 32 threads)
@@ -499,17 +558,43 @@ int main(int argc, char *argv[]) {
 	Aggiunto: succede che si genera solo un blocco e lavorano solo tot thread, il resto rimane inutilizzato
 	*/
 
-	// Indicativa per i test
-	sequencer<<<ceil(pat_number/1024.0), 1024>>>(g_seq_length, g_pat_number, g_sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found);
+	// Nel caso ci siano più processi MPI che vogliono accedere alla stessa GPU, devo serializzare l'accesso
+    // Questa cosa va bene perché tanto ogni rank avrà un insieme di pattern differente dagli altri da cercare
+    // Ovviamente tutte le GPU devono essere impegnate contemporaneamente
 
-	cudaDeviceSynchronize();
+	MPI_Barrier(MPI_COMM_WORLD);
+
+    // Imposto il device per ogni processo (considerando che i nodi del cluster hanno due GPU ciascuno)
+    if (rank % 2 == 0) {
+        cudaSetDevice(0);
+    } else {
+        cudaSetDevice(1);
+    }
+    
+    // da rivedere
+    // rank pari (0) lavora su GPU 0
+    if (rank % 2 == 0) {
+        sequencer<<<ceil(my_pat_number/1024.0), 1024>>>(g_seq_length, g_pat_number, g_sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found, g_my_first_pattern);
+        cudaDeviceSynchronize();
+    }
+
+    // rank dispari (1) lavora su GPU 1
+    if (rank % 2 == 1) {
+        sequencer<<<ceil(my_pat_number/1024.0), 1024>>>(g_seq_length, g_pat_number, g_sequence, d_pat_length, d_pattern, g_seq_matches, g_pat_matches, g_pat_found, g_my_first_pattern);
+        cudaDeviceSynchronize();
+    }
+    
+    MPI_Barrier(MPI_COMM_WORLD);
 
 	// Riporto le variabili, che il kernel ha modificato, utilizzate dal checksum nell'host
-	
 	cudaMemcpy(seq_matches, g_seq_matches, seq_length * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(&pat_matches, g_pat_matches, sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(pat_found, g_pat_found, pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
+	cudaMemcpy(my_pat_found, g_pat_found, my_pat_number * sizeof(unsigned long), cudaMemcpyDeviceToHost);
 
+	// Porto i pattern trovati dai rank in un unica struttura (pat_found)
+	for( ind=0; ind<my_pat_number; ind++ ) {
+		pat_found[ my_first_pattern + ind ] = my_pat_found[ind];
+	}
 
 	cudaFree(g_seq_matches);
 	cudaFree(g_pat_matches);
@@ -519,24 +604,87 @@ int main(int argc, char *argv[]) {
 
 	cudaDeviceSynchronize();
 
-	/* Debug: Print seq_matches array */
-	printf("Sequence matches: ");
-	for (lind = 0; lind < seq_length; lind++) {
-		printf("%d ", seq_matches[lind]);
+
+	// Tutti i rank inviano i propri seq_matches al rank 0
+	if(rank > 0){
+		MPI_Send(seq_matches, seq_length, MPI_INT, 0, 0, MPI_COMM_WORLD);
 	}
-	printf("\n");
+
+    // Il rank 0 si occuperà di sommare i seq_matches di tutti i rank
+    if (rank == 0) {
+		int *local_seq_matches;
+		local_seq_matches = (int *)malloc( sizeof(int) * seq_length );
+		
+		for (int i = 1; i < size; i++) {
+			MPI_Recv(local_seq_matches, seq_length, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			
+			for (unsigned long j = 0; j < seq_length; j++) {
+				if (seq_matches[j] >= 0 && local_seq_matches[j] >= 0) {
+					seq_matches[j] = seq_matches[j] + local_seq_matches[j] + 1;
+				} else {
+					if(seq_matches[j] == NOT_FOUND){
+						seq_matches[j] = local_seq_matches[j];
+					}
+					
+				}
+			}
+		}
+		
+		free(local_seq_matches);
+	}
+	MPI_Barrier( MPI_COMM_WORLD );
+
+	// Ognuno invia i pattern trovati al rank 0
+	//MPI_Gather(pat_found + my_first_pattern, my_patterns, MPI_UNSIGNED_LONG, pat_found, my_patterns, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+	
+	int send_counts[size]; // {133, 133, 134}; // Numero di elementi da inviare per ciascun rank 
+	send_counts[rank] = my_pat_number;
+
+	int displs[size]; //= {0, 133, 266};
+	displs[rank] = my_first_pattern;
+	
+	MPI_Allgather(&my_pat_number, 1, MPI_INT, send_counts, 1, MPI_INT, MPI_COMM_WORLD);
+	MPI_Allgather(&my_first_pattern, 1, MPI_INT, displs, 1, MPI_INT, MPI_COMM_WORLD);
+
+	MPI_Barrier( MPI_COMM_WORLD );
+
+	MPI_Gatherv(my_pat_found, my_pat_number, MPI_UNSIGNED_LONG, pat_found, send_counts, displs, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+	
+	// Ognuno invia al rank 0 il numero di pattern trovati sommandoli con la reduce
+	int total_pat_matches = 0;
+	MPI_Reduce(&pat_matches, &total_pat_matches, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+	// Il rank 0 assegna il valore di total_pat_matches a pat_matches
+	if (rank == 0) {
+		pat_matches = total_pat_matches;
+	}
+
+	/*if (rank == 0) {
+		// Debug: Print seq_matches array
+		printf("Sequence matches: ");
+		for (lind = 0; lind < seq_length; lind++) {
+			printf("%d ", seq_matches[lind]);
+		}
+		printf("\n");
+	}*/
+
+	MPI_Barrier( MPI_COMM_WORLD );
 	
 	/* 7. Check sums */
 	unsigned long checksum_matches = 0;
 	unsigned long checksum_found = 0;
-	for( ind=0; ind < pat_number; ind++) {
-		if ( pat_found[ind] != (unsigned long)NOT_FOUND )
-			checksum_found = ( checksum_found + pat_found[ind] ) % CHECKSUM_MAX;
+	if(rank == 0) {
+		for( ind=0; ind < pat_number; ind++) {
+			if ( pat_found[ind] != (unsigned long)NOT_FOUND )
+				checksum_found = ( checksum_found + pat_found[ind] ) % CHECKSUM_MAX;
+		}
+		for( lind=0; lind < seq_length; lind++) {
+			if ( seq_matches[lind] != NOT_FOUND )
+				checksum_matches = ( checksum_matches + seq_matches[lind] ) % CHECKSUM_MAX;
+		}
 	}
-	for( lind=0; lind < seq_length; lind++) {
-		if ( seq_matches[lind] != NOT_FOUND )
-			checksum_matches = ( checksum_matches + seq_matches[lind] ) % CHECKSUM_MAX;
-	}
+
+	
 
 #ifdef DEBUG
 	/* DEBUG: Write results */
@@ -555,7 +703,6 @@ int main(int argc, char *argv[]) {
 #endif // DEBUG
 
 	/* Free local resources */	
-
 	free( sequence );
 	free( seq_matches );
 
@@ -565,21 +712,23 @@ int main(int argc, char *argv[]) {
  *
  */
 
-	/* 8. Stop global timer */
-        CUDA_CHECK_FUNCTION( cudaDeviceSynchronize() );
+	/* 8. Stop global time */
+	MPI_Barrier( MPI_COMM_WORLD );
 	ttotal = cp_Wtime() - ttotal;
 
 	/* 9. Output for leaderboard */
-	printf("\n");
-	/* 9.1. Total computation time */
-	printf("Time: %lf\n", ttotal );
+	if ( rank == 0 ) {
+		printf("\n");
+		/* 9.1. Total computation time */
+		printf("Time: %lf\n", ttotal );
 
-	/* 9.2. Results: Statistics */
-	printf("Result: %d, %lu, %lu\n\n", 
-			pat_matches,
-			checksum_found,
-			checksum_matches );
-		
+		/* 9.2. Results: Statistics */
+		printf("Result: %d, %lu, %lu\n\n", 
+				pat_matches,
+				checksum_found,
+				checksum_matches );
+	}
+				
 	/* 10. Free resources */	
 	int i;
 	for( i=0; i<pat_number; i++ ) free( pattern[i] );
@@ -588,5 +737,6 @@ int main(int argc, char *argv[]) {
 	free( pat_found );
 
 	/* 11. End */
+	MPI_Finalize();
 	return 0;
 }
